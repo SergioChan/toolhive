@@ -121,16 +121,17 @@ func (rfw *ResponseFilteringWriter) Flush() {
 func (rfw *ResponseFilteringWriter) processJSONResponse(rawResponse []byte) error {
 	message, err := jsonrpc2.DecodeMessage(rawResponse)
 	if err != nil {
-		rfw.ResponseWriter.WriteHeader(rfw.statusCode)
-		_, err := rfw.ResponseWriter.Write(rawResponse)
-		return err
+		// Fail closed: do not forward an unfiltered response that we cannot parse.
+		slog.Warn("Failed to decode backend response for authorization filtering, blocking response",
+			"error", err)
+		return rfw.writeErrorResponse(jsonrpc2.ID{}, fmt.Errorf("failed to decode backend response for filtering"))
 	}
 
 	response, ok := message.(*jsonrpc2.Response)
 	if !ok {
-		rfw.ResponseWriter.WriteHeader(rfw.statusCode)
-		_, err := rfw.ResponseWriter.Write(rawResponse)
-		return err
+		// Fail closed: unexpected message type cannot be filtered safely.
+		slog.Warn("Unexpected message type from backend during authorization filtering, blocking response")
+		return rfw.writeErrorResponse(jsonrpc2.ID{}, fmt.Errorf("unexpected message type from backend"))
 	}
 
 	filteredResponse, err := rfw.filterListResponse(response)
@@ -177,16 +178,17 @@ func (rfw *ResponseFilteringWriter) processSSEResponse(rawResponse []byte) error
 		if data, ok := bytes.CutPrefix(line, []byte("data:")); ok {
 			message, err := jsonrpc2.DecodeMessage(data)
 			if err != nil {
-				rfw.ResponseWriter.WriteHeader(rfw.statusCode)
-				_, err := rfw.ResponseWriter.Write(rawResponse)
-				return err
+				// Fail closed: do not forward an unfiltered SSE event that we cannot parse.
+				slog.Warn("Failed to decode SSE event for authorization filtering, blocking response",
+					"error", err)
+				return rfw.writeErrorResponse(jsonrpc2.ID{}, fmt.Errorf("failed to decode backend response for filtering"))
 			}
 
 			response, ok := message.(*jsonrpc2.Response)
 			if !ok {
-				rfw.ResponseWriter.WriteHeader(rfw.statusCode)
-				_, err := rfw.ResponseWriter.Write(rawResponse)
-				return err
+				// Fail closed: unexpected message type cannot be filtered safely.
+				slog.Warn("Unexpected message type in SSE event during authorization filtering, blocking response")
+				return rfw.writeErrorResponse(jsonrpc2.ID{}, fmt.Errorf("unexpected message type from backend"))
 			}
 
 			filteredResponse, err := rfw.filterListResponse(response)
