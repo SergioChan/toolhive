@@ -180,6 +180,92 @@ func TestServer_HealthMonitoring_Enabled(t *testing.T) {
 	}
 }
 
+func TestStatusEndpoint_UsesLiveHealthMonitorState(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockRouter := routermocks.NewMockRouter(ctrl)
+	mockBackendClient := mocks.NewMockBackendClient(ctrl)
+	mockDiscoveryMgr := discoverymocks.NewMockManager(ctrl)
+
+	backends := []vmcp.Backend{
+		{ID: "backend-1", Name: "Backend 1", BaseURL: "http://localhost:8080", TransportType: "sse", HealthStatus: vmcp.BackendHealthy},
+		{ID: "backend-2", Name: "Backend 2", BaseURL: "http://localhost:8081", TransportType: "sse", HealthStatus: vmcp.BackendHealthy},
+	}
+
+	// backend-1 remains healthy; backend-2 fails health checks and should be reported unhealthy.
+	mockBackendClient.EXPECT().
+		ListCapabilities(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, target *vmcp.BackendTarget) (*vmcp.CapabilityList, error) {
+			if target.WorkloadID == "backend-1" {
+				return &vmcp.CapabilityList{}, nil
+			}
+			return nil, assert.AnError
+		}).
+		AnyTimes()
+
+	cfg := &Config{
+		Name:    "test-server",
+		Version: "1.0.0",
+		Host:    "127.0.0.1",
+		Port:    0,
+		HealthMonitorConfig: &health.MonitorConfig{
+			CheckInterval:      50 * time.Millisecond,
+			UnhealthyThreshold: 1,
+			Timeout:            5 * time.Second,
+			DegradedThreshold:  2 * time.Second,
+		},
+	}
+
+	backendRegistry := vmcp.NewImmutableRegistry(backends)
+	srv, err := New(context.Background(), cfg, mockRouter, mockBackendClient, mockDiscoveryMgr, backendRegistry, nil)
+	require.NoError(t, err)
+
+	mockDiscoveryMgr.EXPECT().Stop().AnyTimes()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		if err := srv.Start(ctx); err != nil {
+			errCh <- err
+		}
+	}()
+
+	select {
+	case <-srv.Ready():
+	case err := <-errCh:
+		t.Fatalf("server failed to start: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for server to start")
+	}
+
+	require.Eventually(t, func() bool {
+		status, err := srv.GetBackendHealthStatus("backend-2")
+		return err == nil && status == vmcp.BackendUnhealthy
+	}, 2*time.Second, 10*time.Millisecond, "backend-2 should become unhealthy")
+
+	status := srv.buildStatusResponse(context.Background())
+	require.Len(t, status.Backends, 2)
+
+	statusesByName := map[string]string{}
+	for _, backend := range status.Backends {
+		statusesByName[backend.Name] = backend.Health
+	}
+
+	assert.Equal(t, string(vmcp.BackendHealthy), statusesByName["Backend 1"])
+	assert.Equal(t, string(vmcp.BackendUnhealthy), statusesByName["Backend 2"])
+	assert.True(t, status.Healthy)
+
+	cancel()
+	select {
+	case <-errCh:
+	case <-time.After(2 * time.Second):
+	}
+}
+
 // TestServer_HealthMonitoring_StartupFailure verifies graceful degradation when health monitor fails to start.
 func TestServer_HealthMonitoring_StartupFailure(t *testing.T) {
 	t.Parallel()
