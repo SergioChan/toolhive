@@ -65,15 +65,20 @@ func (s *Server) buildStatusResponse(ctx context.Context) StatusResponse {
 
 	hasHealthyBackend := false
 	for _, backend := range backends {
+		healthStatus := backend.HealthStatus
+		if liveStatus, err := s.GetBackendHealthStatus(backend.ID); err == nil {
+			healthStatus = liveStatus
+		}
+
 		status := BackendStatus{
 			Name:      backend.Name,
-			Health:    string(backend.HealthStatus),
+			Health:    string(healthStatus),
 			Transport: backend.TransportType,
 			AuthType:  getAuthType(backend.AuthConfig),
 		}
 		backendStatuses = append(backendStatuses, status)
 
-		if backend.HealthStatus == vmcp.BackendHealthy {
+		if healthStatus == vmcp.BackendHealthy {
 			hasHealthyBackend = true
 		}
 	}
